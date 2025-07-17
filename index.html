@@ -15,11 +15,12 @@
     #controls label { margin-right:10px; }
     #map { position:absolute; top:0; bottom:0; width:100%; }
   </style>
-  <!-- MapLibre GL for base map -->
-  <link href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css" rel="stylesheet"/>
-  <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
-  <!-- deck.gl for GPU heatmap -->
+
+  <!-- deck.gl + MapLibre GL -->
   <script src="https://unpkg.com/deck.gl@8.8.19/dist.min.js"></script>
+  <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
+  <link   href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css" rel="stylesheet"/>
+
   <!-- PapaParse for CSV parsing -->
   <script src="https://unpkg.com/papaparse@5.3.2/papaparse.min.js"></script>
 </head>
@@ -35,7 +36,7 @@
   <div id="map"></div>
 
   <script>
-  // Populate selectors
+  // — Populate selectors —
   const solarSel   = document.getElementById('solarSelect');
   const batterySel = document.getElementById('batterySelect');
   for(let i=1;i<=10;i++) solarSel.add(new Option(i+' GW', i));
@@ -43,61 +44,61 @@
   solarSel.value = 1;
   batterySel.value = 1;
 
-  // Data holders
-  let locationsData = null, utilData = null, pointsData = null;
+  // — Data holders —
+  let pointsData = null;
 
-  // Init DeckGL + MapLibre
+  // — Initialize deck.gl with MapLibre style —
   const deckgl = new deck.DeckGL({
     container: 'map',
-    map: false,
+    mapStyle: 'https://demotiles.maplibre.org/style.json',
+    mapboxApiAccessToken: '',            // not needed for MapLibre
     initialViewState: {
-      longitude: 0, latitude: 20, zoom: 1.2, pitch: 30, bearing: 0
+      longitude: 0,
+      latitude: 20,
+      zoom: 1.2,
+      pitch: 30,
+      bearing: 0
     },
     controller: true,
     layers: []
   });
-  // Underlying basemap
-  new maplibregl.Map({
-    container: 'map',
-    style: 'https://demotiles.maplibre.org/style.json',
-    center: [0,20],
-    zoom: 1.2,
-    pitch: 30,
-    interactive: false
-  });
 
-  // Load CSVs from same repo folder
+  // — Load your two CSVs (must be in same folder) —
   Promise.all([
     fetch('locations_100locs.csv').then(r=>r.text()),
     fetch('utilization_100locs.csv').then(r=>r.text())
   ]).then(([locTxt, utilTxt])=>{
-    // parse
     const locs = Papa.parse(locTxt, { header:true, dynamicTyping:true }).data;
     const utils= Papa.parse(utilTxt,{ header:true, dynamicTyping:true }).data;
-    // join on first column (key)
+
+    // join on first column (e.g. "loc")
     const key = Object.keys(locs[0])[0];
     const utilMap = {};
-    utils.forEach(u=> { if(u[key]!=null) utilMap[u[key]] = u; });
-    pointsData = locs.map(r=>{
+    utils.forEach(u => { if(u[key]!=null) utilMap[u[key]] = u; });
+
+    // build pointsData array of { position: [lon,lat], ...utilProperties }
+    pointsData = locs.map(r => {
       const u = utilMap[r[key]] || {};
-      return {
-        position: [r.lon, r.lat],
-        ...u
-      };
+      return Object.assign(
+        { position: [r.lon, r.lat] },
+        u
+      );
     });
+
+    // first render
     renderHeatmap();
-  }).catch(err=> {
-    console.error("CSV load error—make sure your CSVs are in the same folder as this HTML:", err);
-    alert("Failed to load CSVs. Check console.");
+  }).catch(err=>{
+    console.error("Failed to load CSVs—make sure both are in the same HTTP‑served folder:", err);
+    alert("CSV load error; check console.");
   });
 
-  // Render or update the heatmap layer
+  // — Render or update the heatmap layer —
   function renderHeatmap(){
     if(!pointsData) return;
     const s = solarSel.value, b = batterySel.value;
     const weightKey = `${s}GW_${b}GWh`;
 
-    const heatLayer = new deck.HeatmapLayer({
+    const heat = new deck.HeatmapLayer({
       id: 'heat',
       data: pointsData,
       getPosition: d => d.position,
@@ -107,10 +108,10 @@
       threshold: 0.03
     });
 
-    deckgl.setProps({ layers: [ heatLayer ] });
+    deckgl.setProps({ layers: [heat] });
   }
 
-  // Listen for selector changes
+  // — Update on user selection —
   solarSel  .addEventListener('change', renderHeatmap);
   batterySel.addEventListener('change', renderHeatmap);
   </script>
