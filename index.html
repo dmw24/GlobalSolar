@@ -2,202 +2,117 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
-  <title>Global Solar Utilization Choropleth</title>
+  <title>Interactive Solar Utilization Heatmap</title>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
   <style>
-    html, body { height:100%; margin:0; }
+    body { margin:0; overflow:hidden; }
     #controls {
-      position:absolute; top:0; left:0; right:0; height:50px;
-      background:#fff; z-index:1000; padding:8px; font-family:sans-serif;
+      position:absolute; top:10px; left:10px;
+      background:rgba(255,255,255,0.9);
+      padding:10px; border-radius:4px;
+      font-family:sans-serif; z-index:1000;
     }
-    #map { position:absolute; top:50px; bottom:0; width:100%; }
-    label { margin-right:20px; }
+    #controls label { margin-right:10px; }
+    #map { position:absolute; top:0; bottom:0; width:100%; }
   </style>
+  <!-- MapLibre GL for base map -->
+  <link href="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.css" rel="stylesheet"/>
+  <script src="https://unpkg.com/maplibre-gl@2.4.0/dist/maplibre-gl.js"></script>
+  <!-- deck.gl for GPU heatmap -->
+  <script src="https://unpkg.com/deck.gl@8.8.19/dist.min.js"></script>
+  <!-- PapaParse for CSV parsing -->
+  <script src="https://unpkg.com/papaparse@5.3.2/papaparse.min.js"></script>
 </head>
 <body>
   <div id="controls">
-    <label>Solar (GW):
+    <label>Solar:
       <select id="solarSelect"></select>
     </label>
-    <label>Battery (GWh):
+    <label>Battery:
       <select id="batterySelect"></select>
     </label>
   </div>
   <div id="map"></div>
 
-  <!-- Leaflet -->
-  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-  <!-- PapaParse -->
-  <script src="https://unpkg.com/papaparse@5.3.2/papaparse.min.js"></script>
-  <!-- Turf.js -->
-  <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
-
   <script>
-  // Derive base URL for CSV files
-  const url = new URL(window.location.href);
-  const dir = url.pathname.substring(0, url.pathname.lastIndexOf('/') + 1);
-  const baseUrl = url.origin + dir;
+  // Populate selectors
+  const solarSel   = document.getElementById('solarSelect');
+  const batterySel = document.getElementById('batterySelect');
+  for(let i=1;i<=10;i++) solarSel.add(new Option(i+' GW', i));
+  for(let j=1;j<=15;j++) batterySel.add(new Option(j+' GWh', j));
+  solarSel.value = 1;
+  batterySel.value = 1;
 
-  // 1) Initialize Leaflet map
-  const map = L.map('map').setView([20, 0], 2);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© OpenStreetMap contributors'
-  }).addTo(map);
+  // Data holders
+  let locationsData = null, utilData = null, pointsData = null;
 
-  // 2) Populate dropdowns
-  const solarSelect = document.getElementById('solarSelect');
-  const batterySelect = document.getElementById('batterySelect');
-  for (let i = 1; i <= 10; i++) {
-    const o = document.createElement('option');
-    o.value = i; o.text = i + ' GW';
-    solarSelect.add(o);
-  }
-  for (let j = 1; j <= 15; j++) {
-    const o = document.createElement('option');
-    o.value = j; o.text = j + ' GWh';
-    batterySelect.add(o);
-  }
-  solarSelect.value = 1;
-  batterySelect.value = 1;
+  // Init DeckGL + MapLibre
+  const deckgl = new deck.DeckGL({
+    container: 'map',
+    map: false,
+    initialViewState: {
+      longitude: 0, latitude: 20, zoom: 1.2, pitch: 30, bearing: 0
+    },
+    controller: true,
+    layers: []
+  });
+  // Underlying basemap
+  new maplibregl.Map({
+    container: 'map',
+    style: 'https://demotiles.maplibre.org/style.json',
+    center: [0,20],
+    zoom: 1.2,
+    pitch: 30,
+    interactive: false
+  });
 
-  // 3) Data holders
-  let locationsMap = {};    // locKey -> {lat, lon}
-  let utilRows = [];        // rows from utilization CSV
-  let utilIndexKey = '';    // column name for locKey
-  let landPolygons = null;  // world land GeoJSON
-  let cellsLayer = null;    // choropleth layer
+  // Load CSVs from same repo folder
+  Promise.all([
+    fetch('locations_100locs.csv').then(r=>r.text()),
+    fetch('utilization_100locs.csv').then(r=>r.text())
+  ]).then(([locTxt, utilTxt])=>{
+    // parse
+    const locs = Papa.parse(locTxt, { header:true, dynamicTyping:true }).data;
+    const utils= Papa.parse(utilTxt,{ header:true, dynamicTyping:true }).data;
+    // join on first column (key)
+    const key = Object.keys(locs[0])[0];
+    const utilMap = {};
+    utils.forEach(u=> { if(u[key]!=null) utilMap[u[key]] = u; });
+    pointsData = locs.map(r=>{
+      const u = utilMap[r[key]] || {};
+      return {
+        position: [r.lon, r.lat],
+        ...u
+      };
+    });
+    renderHeatmap();
+  }).catch(err=> {
+    console.error("CSV load error—make sure your CSVs are in the same folder as this HTML:", err);
+    alert("Failed to load CSVs. Check console.");
+  });
 
-  // 4) Color ramp: 0→blue, 1→red
-  function getColor(v) {
-    const hue = (1 - v) * 240;
-    return `hsl(${hue},100%,50%)`;
-  }
+  // Render or update the heatmap layer
+  function renderHeatmap(){
+    if(!pointsData) return;
+    const s = solarSel.value, b = batterySel.value;
+    const weightKey = `${s}GW_${b}GWh`;
 
-  // 5) Load world land polygons (countries GeoJSON)
-  fetch('https://raw.githubusercontent.com/datasets/geo-boundaries-world-110m/master/countries.geojson')
-    .then(r => r.json())
-    .then(js => {
-      landPolygons = js;
-      loadLocations();
-    })
-    .catch(err => console.error('Error loading land polygons:', err));
-
-  // 6) Load locations CSV
-  function loadLocations() {
-    fetch(baseUrl + 'locations_100locs.csv')
-      .then(r => r.text())
-      .then(txt => {
-        Papa.parse(txt, {
-          header: true,
-          dynamicTyping: true,
-          complete(res) {
-            utilIndexKey = res.meta.fields[0];
-            res.data.forEach(r => {
-              const k = r[utilIndexKey];
-              if (k != null) locationsMap[k] = { lat: r.lat, lon: r.lon };
-            });
-            loadUtil();
-          }
-        });
-      })
-      .catch(err => console.error('Error loading locations CSV:', err));
-  }
-
-  // 7) Load utilization CSV
-  function loadUtil() {
-    fetch(baseUrl + 'utilization_100locs.csv')
-      .then(r => r.text())
-      .then(txt => {
-        Papa.parse(txt, {
-          header: true,
-          dynamicTyping: true,
-          complete(res) {
-            utilIndexKey = res.meta.fields[0];
-            utilRows = res.data.filter(r => r[utilIndexKey] != null);
-            renderChoropleth();
-          }
-        });
-      })
-      .catch(err => console.error('Error loading utilization CSV:', err));
-  }
-
-  // 8) Build & render Voronoi‑IDW choropleth
-  function renderChoropleth() {
-    if (!landPolygons || utilRows.length < 3) return;
-
-    // Clear existing layer
-    if (cellsLayer) map.removeLayer(cellsLayer);
-
-    const s = solarSelect.value;
-    const b = batterySelect.value;
-    const colKey = `${s}GW_${b}GWh`;
-
-    // Build Turf points with values
-    const pts = utilRows.map(r => {
-      const k = r[utilIndexKey], v = r[colKey], c = locationsMap[k];
-      return (c && v != null)
-        ? turf.point([c.lon, c.lat], { value: v })
-        : null;
-    }).filter(x => x);
-
-    if (pts.length < 3) {
-      console.warn('Need at least 3 data points; got', pts.length);
-      return;
-    }
-
-    const fc = turf.featureCollection(pts);
-
-    // Compute global Voronoi tessellation
-    const vor = turf.voronoi(fc, { bbox: [-180, -90, 180, 90] });
-    if (!vor || !vor.features) {
-      console.error('Voronoi generation failed');
-      return;
-    }
-
-    // For each Voronoi cell:
-    //  - compute centroid
-    //  - keep only if centroid is on land
-    //  - compute IDW from 3 nearest points
-    const cells = [];
-    vor.features.forEach(cell => {
-      if (!cell || cell.geometry.type !== 'Polygon') return;
-      const centroid = turf.centroid(cell);
-      if (!turf.booleanPointInPolygon(centroid, landPolygons)) return;
-
-      // Compute distances to all points
-      const dists = pts.map(p => ({
-        d: turf.distance(centroid, p, { units: 'kilometers' }),
-        v: p.properties.value
-      })).sort((a, b) => a.d - b.d);
-
-      // IDW on 3 nearest
-      let sw = 0, swv = 0;
-      for (let i = 0; i < 3; i++) {
-        const w = 1 / (dists[i].d + 1e-6);
-        sw += w;
-        swv += w * dists[i].v;
-      }
-      cell.properties.value = swv / sw;
-      cells.push(cell);
+    const heatLayer = new deck.HeatmapLayer({
+      id: 'heat',
+      data: pointsData,
+      getPosition: d => d.position,
+      getWeight:   d => d[weightKey] || 0,
+      radiusPixels: 60,
+      intensity: 1,
+      threshold: 0.03
     });
 
-    // Add choropleth layer
-    cellsLayer = L.geoJSON(
-      turf.featureCollection(cells),
-      {
-        style: feature => ({
-          fillColor: getColor(feature.properties.value),
-          fillOpacity: 1.0,
-          stroke: false
-        })
-      }
-    ).addTo(map);
+    deckgl.setProps({ layers: [ heatLayer ] });
   }
 
-  // 9) Event listeners
-  solarSelect.addEventListener('change', renderChoropleth);
-  batterySelect.addEventListener('change', renderChoropleth);
+  // Listen for selector changes
+  solarSel  .addEventListener('change', renderHeatmap);
+  batterySel.addEventListener('change', renderHeatmap);
   </script>
 </body>
 </html>
