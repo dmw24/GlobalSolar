@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>Global Solar Utilization Map</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet/dist/leaflet.css"
+  />
+  <style>
+    html, body { height:100%; margin:0; }
+    #controls {
+      position:absolute; top:0; left:0; right:0; height:50px;
+      background:#fff; z-index:1000; padding:8px; font-family:sans-serif;
+    }
+    #map { position:absolute; top:50px; bottom:0; width:100%; }
+    label { margin-right:20px; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <label>Solar (GW):
+      <select id="solarSelect"></select>
+    </label>
+    <label>Battery (GWh):
+      <select id="batterySelect"></select>
+    </label>
+  </div>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/papaparse@5.3.2/papaparse.min.js"></script>
+  <script>
+    // ==== derive base URL (the folder containing this HTML) ====
+    const url = new URL(window.location.href);
+    const dir = url.pathname.substring(0, url.pathname.lastIndexOf('/') + 1);
+    const baseUrl = `${url.origin}${dir}`;
+
+    // ==== 1. Init map ====
+    const map = L.map('map').setView([20,0],2);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+      attribution:'© OpenStreetMap contributors'
+    }).addTo(map);
+    const markerLayer = L.layerGroup().addTo(map);
+
+    // ==== 2. Build dropdowns ====
+    const solarSelect = document.getElementById('solarSelect');
+    const batterySelect = document.getElementById('batterySelect');
+    for(let i=1;i<=10;i++){
+      const o=document.createElement('option');
+      o.value=i; o.text=i+' GW';
+      solarSelect.add(o);
+    }
+    for(let j=1;j<=15;j++){
+      const o=document.createElement('option');
+      o.value=j; o.text=j+' GWh';
+      batterySelect.add(o);
+    }
+    solarSelect.value=1;
+    batterySelect.value=1;
+
+    // ==== 3. Data containers ====
+    let locationsMap = {}, utilRows = [], utilIndexKey = '';
+
+    // ==== 4. Load locations CSV ====
+    fetch(baseUrl + 'locations_100locs.csv')
+      .then(r => r.text())
+      .then(text => {
+        Papa.parse(text, {
+          header:true, dynamicTyping:true,
+          complete: res => {
+            utilIndexKey = res.meta.fields[0];
+            res.data.forEach(r => {
+              const k = r[utilIndexKey];
+              if(k!=null) locationsMap[k] = {lat:r.lat, lon:r.lon};
+            });
+            console.log('Locations loaded:', Object.keys(locationsMap).length);
+            loadUtil();
+          }
+        });
+      })
+      .catch(err => console.error('Error loading locations CSV:', err));
+
+    // ==== 5. Load utilization CSV ====
+    function loadUtil(){
+      fetch(baseUrl + 'utilization_100locs.csv')
+        .then(r => r.text())
+        .then(text => {
+          Papa.parse(text, {
+            header:true, dynamicTyping:true,
+            complete: res => {
+              utilIndexKey = res.meta.fields[0];
+              utilRows = res.data.filter(r => r[utilIndexKey]!=null);
+              console.log('Util rows loaded:', utilRows.length);
+              drawMarkers();
+            }
+          });
+        })
+        .catch(err => console.error('Error loading utilization CSV:', err));
+    }
+
+    // ==== 6. Color ramp ====
+    function getColor(v){
+      return v>0.8 ? '#800026' :
+             v>0.6 ? '#BD0026' :
+             v>0.4 ? '#E31A1C' :
+             v>0.2 ? '#FC4E2A' :
+             v>0.1 ? '#FD8D3C' :
+                     '#FFEDA0';
+    }
+
+    // ==== 7. Plot circles ====
+    function drawMarkers(){
+      markerLayer.clearLayers();
+      const s = solarSelect.value;
+      const b = batterySelect.value;
+      const colKey = `${s}GW_${b}GWh`;
+      console.log('Rendering for:', colKey);
+      utilRows.forEach(r => {
+        const loc = r[utilIndexKey], v = r[colKey];
+        const c = locationsMap[loc];
+        if(c && v!=null){
+          L.circleMarker([c.lat,c.lon], {
+            radius:8, weight:1, color:'#000',
+            fillColor:getColor(v), fillOpacity:0.9
+          })
+            .bindPopup(`${loc}<br>Util: ${(v*100).toFixed(1)}%`)
+            .addTo(markerLayer);
+        }
+      });
+    }
+
+    solarSelect.addEventListener('change', drawMarkers);
+    batterySelect.addEventListener('change', drawMarkers);
+  </script>
+</body>
+</html>
