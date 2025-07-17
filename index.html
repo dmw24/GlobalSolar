@@ -4,28 +4,20 @@
   <meta charset="utf-8"/>
   <title>Solar Utilization IDW Interpolation</title>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <link
-    rel="stylesheet"
-    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    integrity="sha256-o9N1jE6iJe3oGh4JbN0VfS5A84EMEI+o1BK47IYxF6o="
-    crossorigin=""
-  />
+  <link rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <style>
-    html, body, #map { height: 100%; margin:0; }
+    html, body, #map { height:100%; margin:0; }
     .controls {
-      position: absolute;
-      top: 10px; left: 10px;
-      background: rgba(255,255,255,0.9);
-      padding: 8px;
-      border-radius: 4px;
-      font-family: sans-serif;
-      z-index: 1000;
+      position:absolute; top:10px; left:10px;
+      background:rgba(255,255,255,0.9);
+      padding:8px; border-radius:4px;
+      font-family:sans-serif; z-index:1000;
     }
-    .controls label { margin-right: 12px; }
+    .controls label { margin-right:12px; }
   </style>
 </head>
 <body>
-
   <div id="map"></div>
   <div class="controls">
     <label>Solar:
@@ -36,138 +28,147 @@
     </label>
   </div>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-    integrity="sha256-o9N1jE6iJe3oGh4JbN0VfS5A84EMEI+o1BK47IYxF6o="
-    crossorigin=""></script>
+  <!-- dependencies -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/papaparse@5.3.2/papaparse.min.js"></script>
   <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
 
   <script>
-  // — derive base URL (so fetch('./foo.csv') works on GH Pages) —
+  // base URL for relative fetches
   const base = new URL('.', location.href).href;
 
-  // — init Leaflet map —
+  // 1) initialize Leaflet map
   const map = L.map('map').setView([20, 0], 2);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-    attribution:'© OpenStreetMap contributors'
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors'
   }).addTo(map);
 
-  // — build Solar/Battery selectors —
+  // 2) build the two dropdowns
   const solarSel   = document.getElementById('solarSelect');
   const batterySel = document.getElementById('batterySelect');
-  for(let i=1; i<=10; i++){
-    solarSel.add(new Option(i+' GW', i));
-  }
-  for(let j=1; j<=15; j++){
-    batterySel.add(new Option(j+' GWh', j));
-  }
-  solarSel.value = 1;
+  for (let i = 1; i <= 10; i++) solarSel.add(new Option(i + ' GW', i));
+  for (let j = 1; j <= 15; j++) batterySel.add(new Option(j + ' GWh', j));
+  solarSel.value   = 1;
   batterySel.value = 1;
 
-  // — data holders —
-  let locations = null;   // [{ loc, lat, lon }, …]
-  let utilization = null; // [{ loc, "1GW_1GWh": val, … }, …]
-  let points = null;      // joined array of turf.points
+  // 3) placeholders for our data
+  let locations     = null;
+  let utilization   = null;
+  let points        = null;
+  let landPolygons  = null;
+  let cellsLayer    = null;
 
-  // — load Natural Earth countries (land mask) —
-  let landPolygons = null;
+  // 4) fetch land‐mask (countries geoJSON)
   fetch('https://raw.githubusercontent.com/datasets/geo-boundaries-world-110m/master/countries.geojson')
-    .then(r=>r.json())
-    .then(js=>{
+    .then(r => r.json())
+    .then(js => {
       landPolygons = js;
       loadCSVs();
     })
-    .catch(err=>console.error('land load err',err));
+    .catch(err => console.error('Failed to load land polygons:', err));
 
-  // — load your two CSVs in parallel —
-  function loadCSVs(){
+  // 5) load both CSVs
+  function loadCSVs() {
     Promise.all([
-      fetch(base + 'locations_100locs.csv').then(r=>r.text()),
-      fetch(base + 'utilization_100locs.csv').then(r=>r.text())
-    ]).then(([locTxt, utilTxt])=>{
-      locations   = Papa.parse(locTxt,  { header:true, dynamicTyping:true }).data;
-      utilization = Papa.parse(utilTxt,  { header:true, dynamicTyping:true }).data;
+      fetch(base + 'locations_100locs.csv').then(r => r.text()),
+      fetch(base + 'utilization_100locs.csv').then(r => r.text())
+    ]).then(([locText, utilText]) => {
+      // parse and filter out blank lines
+      locations = Papa.parse(locText, {
+        header: true,
+        dynamicTyping: true
+      }).data.filter(r =>
+        r[Object.keys(r)[0]] != null && r.lat != null && r.lon != null
+      );
+      utilization = Papa.parse(utilText, {
+        header: true,
+        dynamicTyping: true
+      }).data.filter(r =>
+        r[Object.keys(r)[0]] != null
+      );
+
       joinData();
       renderChoropleth();
-    }).catch(err=>{
-      console.error('CSV load err',err);
-      alert('Failed to load CSVs. Check they exist and are served over HTTP.');
+    }).catch(err => {
+      console.error('CSV load error:', err);
+      alert('Could not load CSVs—check that they exist and are HTTP‑served.');
     });
   }
 
-  // — join on first column (e.g. "loc") and build turf points array —
-  function joinData(){
+  // 6) join on the first column (e.g. “loc”) and build turf points
+  function joinData() {
+    if (!turf) {
+      console.error('Turf not found!');
+      return;
+    }
     const key = Object.keys(locations[0])[0];
     const utilMap = {};
-    utilization.forEach(r => { if(r[key]!=null) utilMap[r[key]] = r; });
+    utilization.forEach(row => {
+      if (row[key] != null) utilMap[row[key]] = row;
+    });
 
     points = locations.map(r => {
       const u = utilMap[r[key]] || {};
-      // we'll carry all the util columns in properties
       const props = {};
-      Object.keys(u).forEach(k=>{
-        if(k===key) return;
-        props[k] = u[k];
+      Object.keys(u).forEach(k => {
+        if (k !== key) props[k] = u[k];
       });
-      return turf.point([ r.lon, r.lat ], props);
+      return turf.point([r.lon, r.lat], props);
     });
   }
 
-  // — main: build Voronoi + IDW interpolation + draw —
-  let cellsLayer = null;
-  function renderChoropleth(){
-    if(!landPolygons || !points) return;
-    if(cellsLayer) map.removeLayer(cellsLayer);
+  // 7) do Voronoi + 3‑pt IDW + clip to land + draw
+  function renderChoropleth() {
+    if (!landPolygons || !points) return;
+    if (cellsLayer) map.removeLayer(cellsLayer);
 
-    // which column to use?
-    const s = solarSel.value,
-          b = batterySel.value,
-          col = `${s}GW_${b}GWh`;
+    const s = solarSel.value, b = batterySel.value;
+    const col = `${s}GW_${b}GWh`;
 
-    // build featureCollection of base points
+    // build feature collection
     const fc = turf.featureCollection(points);
 
-    // compute Voronoi globally
-    const vor = turf.voronoi(fc, { bbox:[-180,-90,180,90] });
-    if(!vor || !vor.features){
-      console.error('Voronoi failed');
+    // Voronoi over global bbox
+    const vor = turf.voronoi(fc, { bbox: [-180, -90, 180, 90] });
+    if (!vor || !Array.isArray(vor.features)) {
+      console.error('Voronoi generation failed');
       return;
     }
 
     const cells = [];
-    // for each Voronoi cell polygon
     vor.features.forEach(cell => {
-      if(!cell || cell.geometry.type!=='Polygon') return;
-      // centroid
+      if (!cell || cell.geometry.type !== 'Polygon') return;
       const cpt = turf.centroid(cell);
-      // skip if centroid not on land
-      if(!turf.booleanPointInPolygon(cpt, landPolygons)) return;
 
-      // compute distances to all original points
-      const dists = points.map(p => ({
-        d: turf.distance(cpt, p, { units:'kilometers' }),
+      // skip water
+      if (!turf.booleanPointInPolygon(cpt, landPolygons)) return;
+
+      // compute distances & values
+      const neighbors = points.map(p => ({
+        d: turf.distance(cpt, p, { units: 'kilometers' }),
         v: p.properties[col] || 0
-      })).sort((a,b)=>a.d - b.d);
+      })).sort((a, b) => a.d - b.d);
 
-      // IDW with inverse-distance^2 over 3 nearest
-      let sw=0, swv=0;
-      for(let i=0; i<3; i++){
-        const w = 1/((dists[i].d**2) + 1e-6);
+      // IDW over first 3, with small epsilon to avoid zero‑distance blowup
+      let sw = 0, swv = 0;
+      for (let i = 0; i < 3; i++) {
+        const w = 1 / ( (neighbors[i].d ** 2) + 1e-3 );
         sw  += w;
-        swv += w * dists[i].v;
+        swv += w * neighbors[i].v;
       }
-      cell.properties.value = swv/sw;
-
+      cell.properties.value = sw ? (swv / sw) : 0;
       cells.push(cell);
     });
 
-    // draw as a Leaflet GeoJSON layer
+    // draw
     cellsLayer = L.geoJSON(
-      turf.featureCollection(cells),
-      {
+      turf.featureCollection(cells), {
         style: feat => {
           const v = feat.properties.value;
-          const hue = (1 - v) * 240;
+          // clamp v to [0,1] just in case
+          const vv = Math.max(0, Math.min(1, v));
+          // red→blue via HSL
+          const hue = (1 - vv) * 240;
           return {
             fillColor: `hsl(${hue},100%,50%)`,
             fillOpacity: 1,
@@ -178,8 +179,8 @@
     ).addTo(map);
   }
 
-  // — re-render on selector changes —
-  solarSel .addEventListener('change', renderChoropleth);
+  // 8) re-render on dropdown change
+  solarSel  .addEventListener('change', renderChoropleth);
   batterySel.addEventListener('change', renderChoropleth);
   </script>
 </body>
