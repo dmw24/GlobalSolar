@@ -4,10 +4,7 @@
   <meta charset="utf-8"/>
   <title>Global Solar Utilization Heatmap</title>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <link
-    rel="stylesheet"
-    href="https://unpkg.com/leaflet/dist/leaflet.css"
-  />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
   <style>
     html, body { height:100%; margin:0; }
     #controls {
@@ -29,28 +26,23 @@
   </div>
   <div id="map"></div>
 
-  <!-- Leaflet -->
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-  <!-- Heat plugin (unused here but retained) -->
-  <script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
-  <!-- PapaParse -->
   <script src="https://unpkg.com/papaparse@5.3.2/papaparse.min.js"></script>
-  <!-- Turf.js for interpolation & geo ops -->
   <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
-
   <script>
-  // — derive base URL —
+  // derive base URL for CSVs
   const url = new URL(window.location.href);
   const dir = url.pathname.substring(0, url.pathname.lastIndexOf('/') + 1);
   const baseUrl = `${url.origin}${dir}`;
 
-  // — init map —
-  const map = L.map('map').setView([20,0],2);
+  // 1) init map
+  const map = L.map('map').setView([20, 0], 2);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
     attribution:'© OpenStreetMap contributors'
   }).addTo(map);
+  let interpLayer = null;
 
-  // — dropdowns —
+  // 2) dropdowns
   const solarSelect = document.getElementById('solarSelect');
   const batterySelect = document.getElementById('batterySelect');
   for(let i=1;i<=10;i++){
@@ -66,102 +58,106 @@
   solarSelect.value=1;
   batterySelect.value=1;
 
-  // — data holders —
-  let locationsMap={}, utilRows=[], utilIndexKey='';
-  let landPolygons=null;
-  let interpLayer=null;
+  // 3) data holders
+  let locationsMap = {}, utilRows = [], utilIndexKey = '';
+  let landPolygons = null;
 
-  // — color scale: map [0,1]→hue 240°(blue)→0°(red) —
-  function getColor(v){
-    const hue = (1-v)*240;
-    return `hsl(${hue},100%,50%)`;
-  }
-
-  // — fetch land GeoJSON (all countries → land) —
+  // 4) load land mask
   fetch('https://raw.githubusercontent.com/datasets/geo-boundaries-world-110m/master/countries.geojson')
     .then(r=>r.json())
     .then(js=>{
       landPolygons = js;
       loadLocations();
     })
-    .catch(e=>console.error('Failed to load land polygons:', e));
+    .catch(err=>console.error('land load error',err));
 
   function loadLocations(){
-    fetch(baseUrl + 'locations_100locs.csv')
+    fetch(baseUrl+'locations_100locs.csv')
       .then(r=>r.text())
       .then(txt=>{
         Papa.parse(txt,{header:true,dynamicTyping:true,complete(res){
           utilIndexKey = res.meta.fields[0];
           res.data.forEach(r=>{
-            const k = r[utilIndexKey];
-            if(k!=null) locationsMap[k] = {lat:r.lat,lon:r.lon};
+            const k=r[utilIndexKey];
+            if(k!=null) locationsMap[k]={lat:r.lat,lon:r.lon};
           });
           loadUtil();
         }});
       })
-      .catch(e=>console.error('Failed to load locations:',e));
+      .catch(err=>console.error('locations CSV error',err));
   }
 
   function loadUtil(){
-    fetch(baseUrl + 'utilization_100locs.csv')
+    fetch(baseUrl+'utilization_100locs.csv')
       .then(r=>r.text())
       .then(txt=>{
         Papa.parse(txt,{header:true,dynamicTyping:true,complete(res){
           utilIndexKey = res.meta.fields[0];
           utilRows = res.data.filter(r=>r[utilIndexKey]!=null);
-          renderInterpolation();
+          drawHeatmap();
         }});
       })
-      .catch(e=>console.error('Failed to load utilization:',e));
+      .catch(err=>console.error('util CSV error',err));
   }
 
-  function renderInterpolation(){
+  // 5) interpolation & draw
+  function drawHeatmap(){
+    if(!landPolygons || !utilRows.length) return;
+
+    const s=solarSelect.value, b=batterySelect.value;
+    const colKey = `${s}GW_${b}GWh`;
+
+    // build Turf points
+    const pts = utilRows.map(r=>{
+      const v=r[colKey], k=r[utilIndexKey], c=locationsMap[k];
+      return c && v!=null ? turf.point([c.lon,c.lat],{value:v}) : null;
+    }).filter(x=>x);
+
+    if(pts.length < 3){
+      console.warn('Need ≥3 points to interpolate, got',pts.length);
+      return;
+    }
+
+    const fc = turf.featureCollection(pts);
+    const cellSize = 2; // deg
+    const grid = turf.interpolate(fc, cellSize, {
+      gridType:'point',
+      property:'value',
+      units:'degrees',
+      weight:2
+    });
+    if(!grid || !grid.features){
+      console.error('Interpolation failed');
+      return;
+    }
+
+    // keep only land cells
+    const landPts = grid.features.filter(pt=>{
+      return turf.booleanPointInPolygon(pt, landPolygons);
+    });
+
     // remove old
     if(interpLayer) map.removeLayer(interpLayer);
 
-    // prepare point features
-    const s = solarSelect.value, b = batterySelect.value;
-    const key = `${s}GW_${b}GWh`;
-    const pts = utilRows.map(r=>{
-      const v = r[key];
-      const c = locationsMap[r[utilIndexKey]];
-      return (c && v!=null)
-        ? turf.point([c.lon,c.lat],{value:v})
-        : null;
-    }).filter(x=>x);
-
-    // IDW interpolate on a 2° grid
-    const fc = turf.featureCollection(pts);
-    const cellSize = 2; // degrees
-    const grid = turf.interpolate(fc, cellSize, {
-      gridType: 'point',
-      property: 'value',
-      units: 'degrees'
-    });
-
-    // clip to land
-    const onLand = grid.features.filter(f=>{
-      return turf.booleanPointInPolygon(f, landPolygons);
-    });
-
-    // convert to GeoJSON and style as small squares
-    const squareSize = cellSize * 1000; // approximate px radius
+    // draw new
     interpLayer = L.layerGroup(
-      onLand.map(f=>{
-        const [lon,lat] = f.geometry.coordinates;
-        const v = f.properties.value;
+      landPts.map(pt=>{
+        const [lon,lat]=pt.geometry.coordinates;
+        const v=pt.properties.value;
+        // color: red→blue
+        const hue=(1-v)*240;
         return L.circleMarker([lat,lon],{
-          radius:  cellSize*0.7,
+          radius:  cellSize*0.6,
           stroke:  false,
           fillOpacity: 1.0,
-          fillColor: getColor(v)
+          fillColor: `hsl(${hue},100%,50%)`
         });
       })
     ).addTo(map);
   }
 
-  solarSelect  .addEventListener('change', renderInterpolation);
-  batterySelect.addEventListener('change', renderInterpolation);
+  solarSelect.addEventListener('change',drawHeatmap);
+  batterySelect.addEventListener('change',drawHeatmap);
   </script>
 </body>
 </html>
